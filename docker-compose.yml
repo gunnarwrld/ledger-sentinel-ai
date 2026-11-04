@@ -1,0 +1,37 @@
+# Local dependencies only. Synthetic data, local-only credentials.
+# Image tags must match gradle.properties (used by codegen and integration tests).
+name: payments-lab
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: payments
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payments-local-only}
+    ports:
+      # Host port 55432 because a native PostgreSQL already uses 5432 on the dev machine.
+      - "127.0.0.1:55432:5432"
+    volumes:
+      # PostgreSQL 18 images keep data under /var/lib/postgresql/18/docker and declare the volume
+      # at /var/lib/postgresql. A new major needs a new volume: data files are not compatible.
+      - pg18data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  redis:
+    image: redis:8-alpine
+    ports:
+      # Host port 56379 because another project's Redis already uses 6379 on the dev machine.
+      - "127.0.0.1:56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  pg18data:

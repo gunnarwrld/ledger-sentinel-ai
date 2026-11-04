@@ -1,0 +1,19 @@
+<configuration>
+  <!-- Plain text for now; JSON logs with correlation ids arrive in Phase 5. -->
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <!-- stderr, so stdout carries only command output (create-caller prints its key there). -->
+    <target>System.err</target>
+    <encoder>
+      <pattern>%d{ISO8601} %-5level [%thread] %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="org.eclipse.jetty" level="WARN"/>
+  <logger name="com.zaxxer.hikari" level="WARN"/>
+  <logger name="io.lettuce" level="WARN"/>
+  <logger name="io.netty" level="WARN"/>
+
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+  </root>
+</configuration>

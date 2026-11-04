@@ -1,0 +1,559 @@
+openapi: 3.1.0
+info:
+  title: payments-lab API
+  version: 0.1.0
+  summary: Internal account-to-account transfers on a double-entry ledger. Synthetic data only.
+  description: |
+    Contract v0. Operations marked `x-status: planned` are designed but not implemented
+    (`x-phase` says when). `OpenApiContractSpec` fails the build if this file and the
+    server's registered routes drift apart.
+
+    - Money is integer minor units (`amountMinor`, cents for EUR). No floats, no strings.
+    - A business decline is `201` with `status: DECLINED`, not an error (ADR 0009). A decline is stored: repeating its Idempotency-Key replays DECLINED.
+    - Errors use RFC 9457 `application/problem+json` with `type: about:blank` and a stable `code`;
+      clients branch on `code`. Any operation may answer `500` with code `INTERNAL`: a generic body
+      and a `correlationId` to quote, never internals.
+    - Account-scoped reads return `404` for accounts the caller does not own, so ids cannot be probed.
+servers:
+  - url: http://localhost:8080
+    description: Local development (binds 127.0.0.1 unless HTTP_BIND_ADDRESS is set)
+tags:
+  - name: health
+  - name: accounts
+  - name: transfers
+  - name: operators
+security:
+  - apiKey: []
+
+paths:
+  /health/live:
+    get:
+      tags: [health]
+      operationId: getLiveness
+      summary: The process is up.
+      security: []
+      responses:
+        "200":
+          description: Always, while the process runs, even if dependencies are down.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Liveness"
+
+  /health/ready:
+    get:
+      tags: [health]
+      operationId: getReadiness
+      summary: Whether the app can serve traffic.
+      description: >
+        PostgreSQL gates readiness. Redis is advisory: it is reported but never makes the app
+        unready (DESIGN D5, provisional until the Phase 4 outage policy).
+      security: []
+      responses:
+        "200":
+          description: PostgreSQL is reachable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+              example:
+                status: UP
+                checks: { postgres: UP, redis: DOWN }
+        "503":
+          description: PostgreSQL is unreachable. Answered within 2 seconds.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+
+  /v1/accounts:
+    post:
+      tags: [accounts]
+      operationId: createAccount
+      summary: Open an account owned by the caller. Customers only.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccountRequest"
+      responses:
+        "201":
+          description: Account created, or the stored result replayed.
+          headers:
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/accounts/{accountId}:
+    get:
+      tags: [accounts]
+      operationId: getAccount
+      summary: Balance and status of an account the caller owns.
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          description: The account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/accounts/{accountId}/entries:
+    get:
+      tags: [accounts]
+      operationId: listAccountEntries
+      summary: Statement of postings on an account the caller owns, newest first.
+      description: >
+        Keyset pagination by posting: follow `nextCursor` until it is null. Postings that arrive
+        during a walk never shift the pages still to come; a walk that starts later sees them first.
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque keyset cursor from the previous page's `nextCursor`.
+          schema: { type: string, maxLength: 200 }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: One page of postings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntryPage"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/admin/fundings:
+    post:
+      tags: [operators]
+      operationId: fundAccount
+      summary: Move synthetic money from the SYSTEM funding account into an account. Operators only.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FundingRequest"
+      responses:
+        "201":
+          description: Funding posted as one balanced journal entry.
+          headers:
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Funding"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /v1/transfers:
+    post:
+      tags: [transfers]
+      operationId: createTransfer
+      summary: Move money between two internal accounts.
+      description: >
+        The caller must own the source account. Screening, decision and posting happen inside
+        the request. Repeating the same Idempotency-Key with the same payload returns the stored
+        response with `Idempotent-Replayed: true` and never moves money twice.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferRequest"
+      responses:
+        "201":
+          description: >
+            A transfer was created. Check `status`: POSTED moved money; DECLINED and
+            REVIEW_REQUIRED did not.
+          headers:
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transfer"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /v1/transfers/{transferId}:
+    get:
+      tags: [transfers]
+      operationId: getTransfer
+      summary: A transfer created by the caller (operators can read any).
+      parameters:
+        - $ref: "#/components/parameters/TransferId"
+      responses:
+        "200":
+          description: The transfer in its current state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transfer"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/transfers/{transferId}/reversal:
+    post:
+      tags: [operators]
+      operationId: reverseTransfer
+      summary: Reverse a POSTED transfer with a new balancing journal entry. Operators only.
+      description: History is never edited. If the destination no longer holds the funds, the answer is 422 and nothing is written (ADR 0010). May post to FROZEN accounts, never CLOSED ones. Takes no body (an empty body or `{}`); there are no partial reversals.
+      parameters:
+        - $ref: "#/components/parameters/TransferId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: Reversal posted; the transfer is now REVERSED.
+          headers:
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transfer"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/admin/reviews/{transferId}:
+    post:
+      x-status: planned
+      x-phase: 4
+      tags: [operators]
+      operationId: decideReview
+      summary: Approve or decline a REVIEW_REQUIRED transfer. Operators only.
+      description: Approval re-checks funds at that moment and may still decline (DESIGN A5).
+      parameters:
+        - $ref: "#/components/parameters/TransferId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewDecision"
+      responses:
+        "200":
+          description: The transfer after the decision (POSTED or DECLINED).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transfer"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /metrics:
+    get:
+      x-status: planned
+      x-phase: 5
+      tags: [health]
+      operationId: getMetrics
+      summary: Prometheus metrics. Internal network only.
+      security: []
+      responses:
+        "200":
+          description: Prometheus text exposition format.
+          content:
+            text/plain:
+              schema: { type: string }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: >
+        Caller API key (`pl_test_` + 32 random bytes, base64url), stored server-side only as a
+        SHA-256 hash (ADR 0008). Created with the `create-caller` CLI command, which shows it once.
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Scoped to (caller, operation). Same key and payload: the stored response is replayed
+        byte-for-byte with `Idempotent-Replayed: true`. Same key, different payload: 422. A duplicate
+        sent while the first request is still running waits for it, then replays, or gets 409 after
+        2 s. Only completed operations are stored: after any error the key is free again. Missing:
+        `IDEMPOTENCY_KEY_MISSING`; malformed: `VALIDATION_FAILED`. Clients should send a UUIDv4.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 255
+        pattern: '^[!-~]+$'
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      description: Canonical UUID text. Anything else gets the same `404` as an unknown id.
+      schema: { type: string, format: uuid }
+    TransferId:
+      name: transferId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  headers:
+    IdempotentReplayed:
+      description: Present and `true` when this is a stored response being replayed.
+      schema: { type: boolean }
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema: { type: integer, minimum: 1 }
+
+  responses:
+    BadRequest:
+      description: Malformed input (VALIDATION_FAILED with field errors, IDEMPOTENCY_KEY_MISSING). Nothing stored.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unauthorized:
+      description: >
+        Missing, malformed or unknown API key (UNAUTHENTICATED). The body is the same for every
+        reason, so a failure reveals nothing about which keys exist.
+      headers:
+        WWW-Authenticate:
+          description: Always `Bearer realm="payments-lab"` (RFC 6750).
+          schema: { type: string }
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: Authenticated, but the operation needs the operator role (FORBIDDEN).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: Does not exist, or is not visible to this caller (NOT_FOUND).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Conflict:
+      description: >
+        IDEMPOTENCY_REQUEST_IN_PROGRESS (with Retry-After), IDEMPOTENCY_KEY_EXPIRED, or
+        INVALID_STATE_TRANSITION.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unprocessable:
+      description: >
+        IDEMPOTENCY_KEY_REUSED (different payload), INVALID_ACCOUNT_COMBINATION, or ACCOUNT_NOT_ACTIVE
+        (for example, funding a frozen account), or INSUFFICIENT_FUNDS (a reversal the
+        destination can't cover).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    ServiceUnavailable:
+      description: CONTENTION_RETRY_EXHAUSTED or DEPENDENCY_UNAVAILABLE. Nothing was committed; retry later.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    Liveness:
+      type: object
+      required: [status]
+      properties:
+        status: { const: UP }
+    Readiness:
+      type: object
+      required: [status, checks]
+      properties:
+        status: { $ref: "#/components/schemas/CheckStatus" }
+        checks:
+          type: object
+          required: [postgres, redis]
+          properties:
+            postgres: { $ref: "#/components/schemas/CheckStatus" }
+            redis: { $ref: "#/components/schemas/CheckStatus" }
+    CheckStatus:
+      type: string
+      enum: [UP, DOWN]
+    Currency:
+      type: string
+      enum: [EUR]
+      description: ISO 4217 code, exact and case-sensitive. Single-currency scope (DESIGN A1).
+    TransferAmountMinor:
+      type: integer
+      format: int64
+      minimum: 1
+      maximum: 100000000
+      description: Minor units (cents). 1 to 100,000,000 (1,000,000.00 EUR).
+    CreateAccountRequest:
+      type: object
+      additionalProperties: false
+      required: [currency]
+      properties:
+        currency: { $ref: "#/components/schemas/Currency" }
+    Account:
+      type: object
+      required: [id, currency, status, balanceMinor, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        currency: { $ref: "#/components/schemas/Currency" }
+        status: { type: string, enum: [ACTIVE, FROZEN, CLOSED] }
+        balanceMinor: { type: integer, format: int64, description: Never negative for customer accounts. }
+        createdAt: { type: string, format: date-time }
+    Entry:
+      type: object
+      required: [journalEntryId, kind, amountMinor, currency, createdAt]
+      properties:
+        journalEntryId: { type: string, format: uuid }
+        kind: { type: string, enum: [FUNDING, TRANSFER, REVERSAL] }
+        transferId:
+          type: [string, "null"]
+          format: uuid
+          description: The transfer that created this entry. Not returned yet; planned once statements need it.
+        amountMinor:
+          type: integer
+          format: int64
+          description: Signed. Positive raises this account's balance, negative lowers it (DESIGN D8, pending).
+        currency: { $ref: "#/components/schemas/Currency" }
+        createdAt: { type: string, format: date-time }
+    EntryPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Entry" }
+        nextCursor: { type: [string, "null"] }
+    FundingRequest:
+      type: object
+      additionalProperties: false
+      required: [accountId, amountMinor, currency]
+      properties:
+        accountId: { type: string, format: uuid }
+        amountMinor: { $ref: "#/components/schemas/TransferAmountMinor" }
+        currency: { $ref: "#/components/schemas/Currency" }
+    Funding:
+      type: object
+      required: [journalEntryId, accountId, amountMinor, currency, createdAt]
+      properties:
+        journalEntryId: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        amountMinor: { $ref: "#/components/schemas/TransferAmountMinor" }
+        currency: { $ref: "#/components/schemas/Currency" }
+        createdAt: { type: string, format: date-time }
+    TransferRequest:
+      type: object
+      additionalProperties: false
+      required: [sourceAccountId, destinationAccountId, amountMinor, currency]
+      properties:
+        sourceAccountId: { type: string, format: uuid }
+        destinationAccountId:
+          type: string
+          format: uuid
+          description: Must differ from sourceAccountId (INVALID_ACCOUNT_COMBINATION).
+        amountMinor: { $ref: "#/components/schemas/TransferAmountMinor" }
+        currency: { $ref: "#/components/schemas/Currency" }
+        reference:
+          type: string
+          maxLength: 140
+          description: Free text. Synthetic only; never logged.
+    Transfer:
+      type: object
+      required: [id, status, sourceAccountId, destinationAccountId, amountMinor, currency, declineReason, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [POSTED, DECLINED, REVIEW_REQUIRED, REVERSED] }
+        declineReason:
+          type: [string, "null"]
+          enum: [INSUFFICIENT_FUNDS, ACCOUNT_NOT_ACTIVE, RISK_DECLINED, null]
+          description: Coarse on purpose; rule-level detail is visible to operators only.
+        sourceAccountId: { type: string, format: uuid }
+        destinationAccountId: { type: string, format: uuid }
+        amountMinor: { $ref: "#/components/schemas/TransferAmountMinor" }
+        currency: { $ref: "#/components/schemas/Currency" }
+        reference: { type: [string, "null"], maxLength: 140 }
+        createdAt: { type: string, format: date-time }
+    ReviewDecision:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [APPROVE, DECLINE] }
+        note: { type: string, maxLength: 500 }
+    Problem:
+      type: object
+      description: RFC 9457 problem details plus a stable machine-readable code.
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code:
+          type: string
+          enum:
+            - VALIDATION_FAILED
+            - IDEMPOTENCY_KEY_MISSING
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - NOT_FOUND
+            - IDEMPOTENCY_REQUEST_IN_PROGRESS
+            - IDEMPOTENCY_KEY_EXPIRED
+            - INVALID_STATE_TRANSITION
+            - IDEMPOTENCY_KEY_REUSED
+            - INVALID_ACCOUNT_COMBINATION
+            - ACCOUNT_NOT_ACTIVE
+            - INSUFFICIENT_FUNDS
+            - CONTENTION_RETRY_EXHAUSTED
+            - DEPENDENCY_UNAVAILABLE
+            - INTERNAL
+        correlationId: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
