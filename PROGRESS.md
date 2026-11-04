@@ -127,6 +127,11 @@ The student asked to push everything to a public GitHub repository, named in the
   as if they were finished. It now separates what is verified from what is planned, and says nothing uses
   AI or ML yet, because the name could suggest otherwise.
 - No application code or spec changed.
+- **Verified after publishing:** the page answers without a login (HTTP 200); GitHub reports it PUBLIC with
+  default branch `main`; GitHub's HEAD equals the local commit; 142 files. A fresh anonymous clone, with no
+  build output in it, built from scratch: `./gradlew clean build --warning-mode all` → BUILD SUCCESSFUL in
+  2 min 17 s. `test` 198 run / 0 failed / 0 skipped; `integrationTest` 347 run / 0 failed / 0 skipped. No
+  Gradle deprecation notices, and the build changed no tracked file.
 
 ### 2026-11-03 · Phase 2 review, round 1: money and the ledger's shape (student)
 
