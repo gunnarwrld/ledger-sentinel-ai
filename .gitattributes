@@ -1,0 +1,3 @@
+# The Spock specs (Groovy) are test code only.
+# Keep GitHub's language bar on the Java implementation.
+*.groovy linguist-detectable=false
