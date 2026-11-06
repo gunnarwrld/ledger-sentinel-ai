@@ -108,3 +108,7 @@ are for local use only.
 | `DB_USER` / `DB_PASSWORD` | `payments` / local-only value | Never logged |
 | `DB_POOL_SIZE` | `10` | 1–100 |
 | `REDIS_URL` | `redis://localhost:56379` | |
+
+## License
+
+[MIT](LICENSE). Dependencies keep their own licenses.

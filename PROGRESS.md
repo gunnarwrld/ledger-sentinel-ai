@@ -112,6 +112,12 @@ Phase 2 is complete and every acceptance item has evidence. Before Phase 3, plea
 
 ## Log
 
+### 2026-11-04 · MIT license (student's decision)
+
+- Asked whether to add an MIT license like the one in their `matchday-hub`, the student said yes and chose to
+  put it on its own branch, `chore/mit-license`. `LICENSE` has that file's exact text and copyright line.
+- No application code or spec changed, so the build wasn't rerun.
+
 ### 2026-11-04 · Published to GitHub (student's request)
 
 The student asked to push everything to a public GitHub repository, named in the format they usually use.
@@ -636,6 +642,7 @@ own rationale.
 | D11 | PostgreSQL major version | 0003 | Claude | Move to 18 | **Student, 2026-10-29: switch to PG 18** | *(to write)* |
 | — | jOOQ codegen approach | 0002 | Claude | Generate from a real PostgreSQL container | — | |
 | — | Money representation | 0004 | Claude | `long` minor units, checked arithmetic | **Student, 2026-11-03: proposes to accept, pending final confirmation** | "A long stores cents exactly and keeps arithmetic simple for this single-currency system. double can introduce rounding errors; BigDecimal is exact but adds scale and rounding-policy complexity we don't currently need. Checked arithmetic prevents silent overflow." (2026-11-03) |
+| — | License | — | Claude (asked, noting the student's `matchday-hub` uses MIT) | MIT | **Student, 2026-11-04: MIT** | *(none given)* |
 
 ## Authorship
 
