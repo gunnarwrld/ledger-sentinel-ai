@@ -1,5 +1,7 @@
 # ledger-sentinel-ai
 
+[![CI](https://github.com/gunnarwrld/ledger-sentinel-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/gunnarwrld/ledger-sentinel-ai/actions/workflows/ci.yml)
+
 A Java 21 portfolio project: internal account-to-account transfers on a double-entry ledger, with
 idempotent APIs and safe concurrency. **Synthetic data only. Not a real payment system.** The code and
 docs use the working name `payments-lab`.
